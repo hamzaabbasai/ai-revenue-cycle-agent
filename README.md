@@ -1,218 +1,269 @@
-# Intelligent Revenue Cycle Management (RCM) Agent
+# Healthcare Revenue Cycle Automation with Google ADK
 
-**Subtitle:** Multi-agent healthcare billing assistant powered by LangGraph, Gemini, FastAPI, and Gradio.
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.12+-blue.svg" alt="Python 3.12+">
+  <img src="https://img.shields.io/badge/Google%20ADK-2.4-4285F4.svg" alt="Google ADK 2.4">
+  <img src="https://img.shields.io/badge/Gemini-2.5%20Flash-8E75B2.svg" alt="Gemini 2.5 Flash">
+  <img src="https://img.shields.io/badge/FastAPI-0.139+-009688.svg" alt="FastAPI 0.139+">
+  <img src="https://img.shields.io/badge/A2A-Agent2Agent%20Protocol-5C6BC0.svg" alt="Agent2Agent Protocol">
+  <img src="https://img.shields.io/badge/MCP-Model%20Context%20Protocol-F97316.svg" alt="Model Context Protocol">
+  <img src="https://img.shields.io/badge/Gradio-6.20-FF7C00.svg" alt="Gradio 6.20">
+  <img src="https://img.shields.io/badge/Google%20Cloud-Run-4285F4.svg" alt="Google Cloud Run">
+  <img src="https://img.shields.io/badge/Docker-Container-2496ED.svg" alt="Docker">
+</p>
 
-> ⚠️ This project is a technical prototype for the **Google x Kaggle AI Agents Intensive (Enterprise Agents track)**.  
-> It is **not** a medical product and must **not** be used for real clinical or billing decisions.
+## Business Problem
 
----
+Healthcare teams often check insurance, choose billing codes, send claims, and handle rejected claims by hand. This work can be slow. Missing data or a wrong code can delay payment or cause lost revenue.
 
-[![Watch the demo on YouTube](https://img.youtube.com/vi/oBHuCjsi6NU/0.jpg)](https://www.youtube.com/watch?v=oBHuCjsi6NU)
+The work may also be split across many systems. Staff must repeat steps and find errors after a claim has failed.
 
+## How It Solves the Problem
 
+This system puts the main billing steps in one workflow. It reads claim data, checks the insurance number, suggests ICD-10 codes, sends a test claim, and checks the result. If codes are missing, it tries the coding step again. If a claim is rejected, it writes an appeal letter. It also saves a short claim summary for later use.
 
-## 1. Problem & Motivation
+Google ADK controls the workflow and the agents. Gemini helps with intake, coding, and appeal writing. Fixed rules check important results. The Agent2Agent (A2A) Protocol lets other agents use the workflow. The Model Context Protocol (MCP) makes billing tools available to MCP clients. FastAPI supports normal web apps, and Gradio gives users a simple web screen. Google Cloud Run hosts the services.
 
-Healthcare providers lose large amounts of revenue every year due to:
+This is a technical prototype. It is not a medical product and must not be used for real clinical or billing decisions.
 
-- Incorrect or incomplete medical coding  
-- Preventable claim denials  
-- Manual, error-prone billing workflows  
+ 
 
-Traditional revenue cycle management (RCM) involves:
+## How a Claim Moves Through the System
 
-- Human staff verifying insurance eligibility  
-- Coders mapping visit notes to ICD-10 codes  
-- Staff preparing and submitting claims  
-- Teams investigating denials and writing appeal letters  
+The system processes a claim in these steps:
 
-This is slow, repetitive, and expensive.
+1. The Intake Agent reads the patient ID, insurance number, and visit reason.
+2. A fixed rule checks the insurance number.
+3. The Coding Agent suggests codes from an approved ICD-10 catalog.
+4. Validation removes unsupported codes.
+5. An async claim step acts like a slow outside billing API.
+6. The Audit step lists problems and gives an issue score.
+7. Missing codes go back to coding, up to two times.
+8. The Appeal Agent writes a letter for a rejected claim.
+9. The Memory step stores a short claim summary.
 
----
+Gemini is used for intake, coding, and appeal writing. Local rules and templates are used if Gemini is unavailable.
 
-## 2. Solution Overview
+## Architecture
 
-This project is an **Intelligent Revenue Cycle Management Agent** that acts like a digital billing assistant.
+<p align="center">
+  <img src="assets/architecture.png" alt="Healthcare revenue cycle agent architecture" width="100%">
+</p>
 
-It runs a **multi-agent pipeline**:
+## Main features
 
-1. **Intake Agent** – verifies the insurance number and captures the visit context  
-2. **Coding Agent** – suggests ICD-10 diagnosis codes (using Gemini or a heuristic fallback)  
-3. **Claim Agent** – prepares and “submits” the claim (simulated long-running external API)  
-4. **Audit Agent** – evaluates the claim, computes an issue score, and decides whether to loop back  
-5. **Appeal Agent** – generates an appeal letter for rejected claims  
-6. **Memory Agent** – compacts the context and writes to a long-term memory bank  
+### Multi-agent workflow
 
-The agent is exposed via:
+- Intake Agent parses the request.
+- Coding Agent suggests diagnosis codes.
+- Appeal Agent writes a short appeal when needed.
+- Python workflow nodes handle insurance, validation, claim submission, audit, retry, and memory.
+- Pydantic models pass typed data between every step.
 
-- A **FastAPI A2A-style JSON API**: `POST /a2a/rcm`  
-- A **modern Gradio UI** for interactive testing  
-- A **minimal MCP-style tool server**: `GET /mcp/tools`, `POST /mcp/call`
+### Model Context Protocol (MCP) tools
 
-This fits the **Enterprise Agents** track by targeting a real B2B workflow: automating hospital and clinic billing processes.
+`mcp_server.py` uses `FastMCP` from the official MCP Python SDK. MCP clients can discover and call these tools:
 
----
+- `verify_insurance`
+- `search_code_catalog`
+- `submit_claim`
+- `calculate_issue_score`
 
-## 3. Architecture
+The server supports stdio for local MCP clients and Streamable HTTP at `/mcp` for Cloud Run.
 
-### 3.1 High-Level Diagram (Conceptual)
+### Agent2Agent (A2A) protocol
 
-**User / Calling System**  
-→ FastAPI A2A endpoint (`/a2a/rcm`)  
-→ LangGraph workflow (RCMState)  
-→ Agents (nodes)  
-→ Tools (MCP-style)  
-→ Long-term memory bank
+`a2a_server.py` uses ADK `to_a2a()` to expose the complete workflow through the Agent2Agent Protocol. ADK creates the agent card and A2A routes. This allows another agent to discover the service and send work to it.
 
-### 3.2 Agents (LangGraph Nodes)
+The `POST /a2a/rcm` route is a separate compatibility API. It accepts normal JSON and is useful for applications that do not use the A2A Protocol.
 
-All agents share a single typed state: `RCMState` (patient_id, insurance_number, visit_reason, codes, status, audit_issues, appeal, history, etc.).
+### Long-running operation
 
-- **Intake Agent**
-  - Verifies insurance using `InsuranceCheckTool`
-  - Sets `insurance_verified` flag
-  - Logs step into `history`
+Claim submission uses `asyncio.sleep()` to represent network delay without blocking the server. It returns an operation ID and a claim ID when successful.
 
-- **Coding Agent**
-  - Calls `suggest_icd_codes(visit_reason)`
-  - Uses:
-    - `MockSearchTool` as a built-in-style search tool (MCP-style tool usage)
-    - Gemini via LangChain when `GOOGLE_API_KEY` is available
-    - Heuristic fallback when Gemini is not available
-  - Writes `codes` into the state
-  - Logs into `history`
+### Sessions and memory
 
-- **Claim Agent**
-  - Calls `ClaimSubmitTool` (simulated long-running external API)
-  - Adds a 1-second delay to represent a long-running operation
-  - Writes `status`, `claim_id`, `denial_reason`
-  - Logs into `history`
+- ADK sessions are stored through `DatabaseSessionService`.
+- A caller can send the same session ID to continue a session.
+- Workflow history records each important decision.
+- The last 500 characters are saved as compact context.
+- Claim memory is stored in SQLite and can be viewed at `GET /memory`.
 
-- **Audit Agent**
-  - Checks:
-    - `insurance_verified`
-    - `codes` present
-    - `status` is `"Submitted"`
-  - Uses `CodeExecutionTool` to compute a simple `IssueScore` based on the number of issues
-  - Writes `audit_issues`
-  - Logs into `history`
+SQLite is suitable for local testing. Use Cloud SQL or Agent Runtime for durable production storage on Google Cloud.
 
-- **Appeal Agent**
-  - If status is `"Rejected"`:
-    - Uses Gemini (or template fallback) to generate an appeal letter
-  - If status is `"Submitted"`:
-    - Writes `"No appeal needed – claim is submitted."`
-  - Writes `appeal`
-  - Logs into `history`
+### Checks and logs
 
-- **Memory Agent**
-  - Compacts `history` into a short summary (context compaction)
-  - Stores a record in `long_term_memory` containing:
-    - patient_id  
-    - claim_id  
-    - status  
-    - codes  
-    - summary  
+- The Audit step checks insurance, codes, review needs, and rejected status.
+- `issue_score` is the number of audit issues.
+- Missing codes start a coding retry.
+- Logs are written as JSON, so Cloud Logging can read them easily.
+- Tests cover submission, rejection, retry, fallback parsing, context compaction, and memory.
 
-### 3.3 Workflow (LangGraph)
+### Code structure
 
-The LangGraph `StateGraph` is wired as:
+- `models.py` holds the Pydantic data models.
+- `core.py` holds the billing rules.
+- `agent.py` holds the Google ADK workflow.
+- `runtime.py` runs the workflow and manages sessions.
+- `main.py` holds the API routes.
+- `gradio_app.py` holds the user interface.
+- `mcp_server.py` uses `FastMCP`, so there is no manual protocol code.
+
+## Project structure
 
 ```text
-intake → coding → claim → audit → (conditional) → appeal → memory → END
-                         ↳ if "Missing codes" → coding (loop) ```
+healthcare-revenue-cycle-agent/
+├── .dockerignore
+├── .env.example
+├── .python-version
+├── assets/
+│   └── architecture.png
+├── rcm_agent/
+│   ├── __init__.py
+│   ├── agent.py
+│   ├── core.py
+│   ├── logging_config.py
+│   ├── memory.py
+│   └── models.py
+├── tests/
+│   ├── test_core.py
+│   └── test_memory.py
+├── a2a_server.py
+├── gradio_app.py
+├── main.py
+├── mcp_server.py
+├── runtime.py
+├── Dockerfile
+├── README.md
+├── deploy.sh
+├── pyproject.toml
+├── ai_rcm_agent_v2.ipynb
+└── uv.lock
+```
 
-This shows:
+## Steps to Run the Project
 
-- **Sequential agents**: `intake → coding → claim → audit → appeal → memory`
-- **Looping agent**: `audit` can route back to `coding`
-- **Shared state and history** across all nodes
+You need `uv`, Google Cloud CLI, and a Google Cloud project with billing turned on. The project uses Python 3.12.
 
----
+### 1. Open the project folder
 
-## 4. Features & Course Concepts
+```bash
+cd rcm-adk-google-cloud
+```
 
-This project is designed to hit multiple rubric items from the AI Agents Intensive.
+### 2. Install the project packages
 
-### 4.1 Multi-Agent System
+```bash
+uv sync
+```
 
-- Multiple agents orchestrated via **LangGraph**
-- Each agent is a pure function over `RCMState`
-- Agents collaborate through a **shared, typed state**
+`uv` creates `.venv` and installs the locked package versions.
 
-### 4.2 Tools
+### 3. Set your Google Cloud project
 
-**Custom tools:**
+Copy the example settings file:
 
-- `InsuranceCheckTool`
-- `ClaimSubmitTool`
-- `MockSearchTool`
-- `CodeExecutionTool`
+```bash
+cp .env.example .env
+```
 
-**Minimal MCP-style server:**
+Open `.env`. Replace `your-project-id` with your Google Cloud project ID.
 
-- `GET /mcp/tools` – list tools (name + description)
-- `POST /mcp/call` – call any tool by name with `args` / `kwargs`
+### 4. Sign in to Google Cloud
 
-### 4.3 Long-Running Operations
+```bash
+gcloud auth application-default login
+gcloud config set project YOUR_PROJECT_ID
+```
 
-- `ClaimSubmitTool` simulates a long-running external service  
-  (sleep + random UUID `claim_id`)
-- Demonstrates how the graph can model **slow, external calls**
+Replace `YOUR_PROJECT_ID` with the same project ID.
 
-### 4.4 Sessions & Memory
+### 5. Run the tests
 
-**Session service:**
+```bash
+uv run pytest
+```
 
-- `InMemorySessionService` for the A2A endpoint  
-- Stores per-session state and allows **resuming runs**
+### 6. Start the app
 
-**Long-term memory:**
+```bash
+uv run uvicorn main:app --reload --env-file .env
+```
 
-- `long_term_memory` list holds compact summaries of past claims
-- Uses `compact_context(history)` to keep memory size bounded
+### 7. Open the app
 
-### 4.5 Context Engineering
+- ADK interface: `http://localhost:8000`
+- Gradio interface: `http://localhost:8000/ui`
+- API docs: `http://localhost:8000/docs`
 
-- `history` list accumulates agent events and decisions
-- `compact_context` merges and truncates history to the last ~500 characters
-- Can be extended to feed into **LLM prompts** or **observability dashboards**
+## Send a Test API Request
 
-### 4.6 Observability & Evaluation
+Keep the app running. Open a second terminal and run:
 
-- Each agent node prints log messages (simple tracing)
-- **Audit Agent** acts as an evaluation agent:
-  - Checks correctness of the pipeline outcome
-  - Produces `audit_issues` and an `IssueScore`
-  - Drives the loop (retry coding or move to appeal)
+```bash
+curl -X POST http://localhost:8000/a2a/rcm \
+  -H "Content-Type: application/json" \
+  -d '{
+    "patient_id": "P001",
+    "insurance_number": "AET123456",
+    "visit_reason": "Type 2 diabetes and high blood pressure"
+  }'
+```
 
-### 4.7 A2A Protocol & Deployment
+Use the returned `session_id` in the next request to continue the session.
 
-**A2A-style API:**
+## Run the Agent2Agent (A2A) Service
 
-- `POST /a2a/rcm`  
-  - **Input:** `patient_id`, `insurance_number`, `visit_reason`, optional `session_id`  
-  - **Output:** `session_id` + full final state  
+```bash
+uv run uvicorn a2a_server:app --host 0.0.0.0 --port 8001 --env-file .env
+```
 
-Another agent or system can treat this RCM agent as a **service**.
+Google ADK generates the agent card and A2A endpoints.
 
-**Deployment-ready FastAPI app:**
+## Run the Model Context Protocol (MCP) Service
 
-- Can be run via `uvicorn` locally or containerized for cloud deployment
+Stdio mode:
 
-**Gradio UI:**
+```bash
+uv run python mcp_server.py
+```
 
-- Provides an easy way to demo the agent to non-technical stakeholders
+Streamable HTTP mode:
 
----
+```bash
+MCP_TRANSPORT=http PORT=8002 uv run python mcp_server.py
+```
 
-## 5. Tech Stack
+The Streamable HTTP MCP endpoint is `http://localhost:8002/mcp`.
 
-- **Python 3.10+**
-- **LangGraph** – multi-agent stateful workflows
-- **LangChain + Gemini (Google Generative AI)** – LLM-powered coding & appeals
-- **FastAPI** – A2A-style HTTP API + MCP-style endpoints
-- **Gradio** – modern UI for demo
-- **python-dotenv** – loading `GOOGLE_API_KEY` from `.env`
+## Google Cloud Deployment
 
----
+The script deploys three private Cloud Run services:
+
+- Main ADK API and Gradio UI
+- A2A protocol service
+- MCP protocol service
+
+```bash
+gcloud auth login
+export GOOGLE_CLOUD_PROJECT="your-project-id"
+export GOOGLE_CLOUD_LOCATION="us-central1"
+chmod +x deploy.sh
+./deploy.sh
+```
+
+Replace `your-project-id` before you run the script. The script turns on the needed Google Cloud APIs, creates a service account, and deploys the three services.
+
+Use a Cloud Run proxy to open a private service locally:
+
+```bash
+gcloud run services proxy rcm-adk-service \
+  --project "$GOOGLE_CLOUD_PROJECT" \
+  --region "$GOOGLE_CLOUD_LOCATION"
+```
+
+## TODOs
+
+1. Connect an insurance eligibility API and a claim clearinghouse in a safe test environment.
+2. Use an approved ICD-10 and CPT data source. Require a medical coder to approve codes before a claim is sent.
+3. Move sessions and memory to Cloud SQL. Add IAM, Secret Manager, and encrypted audit logs.
